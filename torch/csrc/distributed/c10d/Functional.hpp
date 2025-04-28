@@ -4,6 +4,16 @@
 
 namespace c10d {
 
+C10_EXPORT at::Tensor& shm_all_reduce_(
+    at::Tensor& input,
+    std::string reduce_op,
+    std::string group_name);
+
+C10_EXPORT at::Tensor shm_all_reduce(
+    const at::Tensor& input,
+    std::string reduce_op,
+    std::string group_name);
+    
 C10_EXPORT at::Tensor& all_reduce_(
     at::Tensor& input,
     std::string reduce_op,
