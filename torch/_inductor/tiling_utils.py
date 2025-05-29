@@ -12,6 +12,7 @@ import torch
 from torch._inductor import config
 from torch._inductor.dependencies import index_vars_no_squeeze
 from torch._inductor.utils import sympy_product, sympy_subs
+from torch.utils._sympy.functions import Identity
 from torch.utils._ordered_set import OrderedSet
 from torch.utils._sympy.solve import try_solve
 from torch.utils._sympy.symbol import symbol_is_type, SymT
@@ -525,8 +526,12 @@ def extract_normalized_read_writes(
             return_getters_groups,
         )
 
-        n_reads_new = {sympy_subs(read, var_map): v for read, v in n_reads.items()}
-        n_writes_new = {sympy_subs(write, var_map): v for write, v in n_writes.items()}
+        def remove_identity(expr):
+            return expr.replace(Identity, lambda x: x)
+
+        n_reads_new = {sympy_subs(remove_identity(read), var_map): v for read, v in n_reads.items()}
+        n_writes_new = {sympy_subs(remove_identity(write), var_map): v for write, v in n_writes.items()}
+
 
         for expr, buf_names in n_reads_new.items():
             reads[expr] |= buf_names
@@ -627,12 +632,19 @@ def analyze_memory_coalescing(
     uncoalesced_addrs: dict[sympy.Expr, int] = Counter()
 
     for memory_expr, buf_names in itertools.chain(reads.items(), writes.items()):
+        # skip memory deps with indirect vars - todo: better handling
+        indirect_expr = bool(memory_expr.free_symbols - norm_read_writes.var_ranges.keys())
+
+        if indirect_expr:
+            continue
+
         size = get_score(memory_expr, var_ranges)
-        # TODO - handle indirect
         if size == 0:
             continue
 
+
         maybe_coalesced_var = find_coalesced_var(memory_expr, var_ranges)
+
         byte_multipler = 0
         for buf_name in buf_names:
             if buf := V.graph.try_get_buffer(buf_name):
