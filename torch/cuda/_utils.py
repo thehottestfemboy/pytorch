@@ -171,6 +171,12 @@ def _nvrtc_compile(
         for directory in cuda_include_dirs:
             options.append(f"-I{directory}".encode())
 
+    from torch.utils.cpp_extension import include_paths
+
+    paths = include_paths(device="cuda")
+    for path in paths:
+        options.append(f"-I{path}".encode())
+
     # Add custom NVCC options
     if nvcc_options:
         for option in nvcc_options:
