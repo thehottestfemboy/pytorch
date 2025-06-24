@@ -1,5 +1,4 @@
 import ctypes
-import os
 import sys
 from typing import Any, Optional, Union
 
@@ -7,28 +6,6 @@ import torch
 
 # The _get_device_index has been moved to torch.utils._get_device_index
 from torch._utils import _get_device_index as _torch_get_device_index
-
-
-def _get_nvrtc_version(cuda_version: int) -> str:
-    # TODO: Expose this from native code
-    # Follows same logic as LazyNVRTC.cpp getLibVersion()
-    major = cuda_version // 1000
-    minor = (cuda_version // 10) % 10
-
-    if sys.platform == "win32":
-        if major < 11 or (major == 11 and minor < 3):
-            return f"{major}{minor}"
-        elif major == 11:
-            return "112"
-        else:
-            return f"{major}0"
-    else:
-        if major < 11 or (major == 11 and minor < 3):
-            return f"{major}.{minor}"
-        elif major == 11:
-            return "11.2"
-        else:
-            return str(major)
 
 
 # Load CUDA driver and NVRTC
@@ -53,7 +30,6 @@ def _check_cuda(result: int) -> None:
 
 
 def _get_nvrtc_library() -> ctypes.CDLL:
-    # PyTorch packages NVRTC, so we can use it directly
     # Since PyTorch already loads NVRTC, we can use the system library
     # which should be compatible with PyTorch's version
     if sys.platform == "win32":
