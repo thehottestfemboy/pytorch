@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from enum import IntFlag
 from multiprocessing import synchronize
 from types import FrameType
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, Dict
 
 import torch.multiprocessing as mp
 from torch.distributed.elastic.multiprocessing.errors import ProcessFailure, record
@@ -57,8 +57,15 @@ __all__ = [
     "SubprocessContext",
     "LogsDest",
     "LogsSpecs",
+    "SignalConfig",
 ]
 
+@dataclass
+class SignalConfig:
+    """Configuration for signal handling behavior."""
+    grace_period: int = 30  # Grace period in seconds before escalating to SIGKILL
+    handle_sigusr: bool = False  # Whether to handle SIGUSR1 and SIGUSR2 signals
+    forward_signals: bool = True  # Whether to forward signals to child processes
 
 class SignalException(Exception):
     """
@@ -70,6 +77,8 @@ class SignalException(Exception):
         super().__init__(msg)
         self.sigval = sigval
 
+# Global signal configuration that can be modified via command line args
+SIGNAL_CONFIG = SignalConfig()
 
 def _terminate_process_handler(signum: int, frame: Optional[FrameType]) -> None:
     """Termination handler that raises exceptions on the main process.
@@ -83,6 +92,41 @@ def _terminate_process_handler(signum: int, frame: Optional[FrameType]) -> None:
     sigval = signal.Signals(signum)
     raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
 
+def configure_signal_handlers(
+    grace_period: Optional[int] = None,
+    handle_sigusr: Optional[bool] = None,
+    forward_signals: Optional[bool] = None,
+) -> None:
+    """Configure signal handling behavior.
+    
+    Args:
+        grace_period: Time in seconds to wait before escalating to SIGKILL
+        handle_sigusr: Whether to handle SIGUSR1 and SIGUSR2 signals
+        forward_signals: Whether to forward signals to child processes
+    """
+    if grace_period is not None:
+        SIGNAL_CONFIG.grace_period = grace_period
+    if handle_sigusr is not None:
+        SIGNAL_CONFIG.handle_sigusr = handle_sigusr
+    if forward_signals is not None:
+        SIGNAL_CONFIG.forward_signals = forward_signals
+
+def _setup_signal_handlers(on_signal_fn: Callable[[int, Optional[FrameType]], None]) -> None:
+    """Setup signal handlers for the process."""
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, on_signal_fn)
+        signal.signal(signal.SIGINT, on_signal_fn)
+        if not IS_WINDOWS:
+            signal.signal(signal.SIGHUP, on_signal_fn)
+            signal.signal(signal.SIGQUIT, on_signal_fn)
+            if SIGNAL_CONFIG.handle_sigusr:
+                signal.signal(signal.SIGUSR1, on_signal_fn)
+                signal.signal(signal.SIGUSR2, on_signal_fn)
+    else:
+        logger.warning(
+            "Failed to register signal handlers since torchelastic is running on a child thread. "
+            "This could lead to orphaned worker processes if the torchrun is terminated."
+        )
 
 def _get_kill_signal() -> signal.Signals:
     """Get the kill signal. SIGKILL for unix, CTRL_C_EVENT for windows."""
@@ -475,17 +519,7 @@ class PContext(abc.ABC):
 
     def start(self) -> None:
         """Start processes using parameters defined in the constructor."""
-        if threading.current_thread() is threading.main_thread():
-            signal.signal(signal.SIGTERM, _terminate_process_handler)
-            signal.signal(signal.SIGINT, _terminate_process_handler)
-            if not IS_WINDOWS:
-                signal.signal(signal.SIGHUP, _terminate_process_handler)
-                signal.signal(signal.SIGQUIT, _terminate_process_handler)
-        else:
-            logger.warning(
-                "Failed to register signal handlers since torchelastic is running on a child thread. "
-                "This could lead to orphaned worker processes if the torchrun is terminated."
-            )
+        _setup_signal_handlers(_terminate_process_handler)
         self._start()
         self._stdout_tail.start()
         self._stderr_tail.start()
@@ -526,7 +560,7 @@ class PContext(abc.ABC):
                 pc.wait(1)
                 .. do some other work
             except SignalException as e:
-                pc.shutdown(e.sigval, timeout=30)
+                pc.shutdown(e.sigval, timeout=SIGNAL_CONFIG.grace_period)
 
         If SIGTERM or SIGINT occurs, the code above will try to shutdown child processes by propagating
         received signal. If child processes will not terminate in the timeout time, the process will send
@@ -561,7 +595,7 @@ class PContext(abc.ABC):
         raise NotImplementedError
 
     def close(
-        self, death_sig: Optional[signal.Signals] = None, timeout: int = 30
+        self, death_sig: Optional[signal.Signals] = None, timeout: Optional[int] = None
     ) -> None:
         r"""
         Terminates all processes managed by this context and cleans up any
@@ -571,10 +605,14 @@ class PContext(abc.ABC):
             death_sig: Death signal to terminate processes.
             timeout: Time to wait for processes to finish, if process is
                 still alive after this time, it will be terminated via SIGKILL.
+                If not specified, uses the configured grace period.
         """
         if not death_sig:
             death_sig = _get_default_signal()
-        self._close(death_sig=death_sig, timeout=timeout)
+        if timeout is None:
+            timeout = SIGNAL_CONFIG.grace_period
+        if SIGNAL_CONFIG.forward_signals:
+            self._close(death_sig=death_sig, timeout=timeout)
         if self._stdout_tail:
             self._stdout_tail.stop()
         if self._stderr_tail:
@@ -785,18 +823,19 @@ class MultiprocessContext(PContext):
             proc.join(time_to_wait)
         for proc in self._pc.processes:
             if proc.is_alive():
-                logger.warning(
-                    "Unable to shutdown process %s via %s, forcefully exiting via %s",
-                    proc.pid,
-                    death_sig,
-                    _get_kill_signal(),
-                )
-                try:
-                    os.kill(proc.pid, _get_kill_signal())
-                except ProcessLookupError:
-                    # If the process exited because of some reason,
-                    # `ProcessLookupError` will be raised, it is safe to ignore it.
-                    pass
+                if SIGNAL_CONFIG.forward_signals:
+                    logger.warning(
+                        "Unable to shutdown process %s via %s, forcefully exiting via %s",
+                        proc.pid,
+                        death_sig,
+                        _get_kill_signal(),
+                    )
+                    try:
+                        os.kill(proc.pid, _get_kill_signal())
+                    except ProcessLookupError:
+                        # If the process exited because of some reason,
+                        # `ProcessLookupError` will be raised, it is safe to ignore it.
+                        pass
             proc.join()
 
 
@@ -902,7 +941,8 @@ class SubprocessContext(PContext):
                     handler.proc.pid,
                     death_sig.name,
                 )
-                handler.close(death_sig=death_sig)
+                if SIGNAL_CONFIG.forward_signals:
+                    handler.close(death_sig=death_sig)
         end = time.monotonic() + timeout
         for handler in self.subprocess_handlers.values():
             time_to_wait = end - time.monotonic()
@@ -915,7 +955,7 @@ class SubprocessContext(PContext):
                 # the child process will be forcefully terminated via SIGKILL
                 pass
         for handler in self.subprocess_handlers.values():
-            if handler.proc.poll() is None:
+            if handler.proc.poll() is None and SIGNAL_CONFIG.forward_signals:
                 logger.warning(
                     "Unable to shutdown process %s via %s, forcefully exiting via %s",
                     handler.proc.pid,

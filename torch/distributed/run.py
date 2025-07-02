@@ -630,6 +630,27 @@ def get_args_parser() -> ArgumentParser:
     # Rest from the training program.
     parser.add_argument("training_script_args", nargs=REMAINDER)
 
+    # Add signal handling configuration arguments
+    signal_group = parser.add_argument_group("Signal Handling")
+    signal_group.add_argument(
+        "--grace-period",
+        type=int,
+        default=30,
+        help="Grace period in seconds before escalating to SIGKILL (default: 30)",
+    )
+    signal_group.add_argument(
+        "--handle-sigusr",
+        action="store_true",
+        default=False,
+        help="Handle SIGUSR1 and SIGUSR2 signals (useful for SLURM environments)",
+    )
+    signal_group.add_argument(
+        "--no-forward-signals",
+        action="store_true",
+        default=False,
+        help="Do not forward signals to child processes",
+    )
+
     return parser
 
 
@@ -889,6 +910,15 @@ def run(args):
         )
 
     config, cmd, cmd_args = config_from_args(args)
+
+    # Configure signal handling based on command line arguments
+    from torch.distributed.elastic.multiprocessing.api import configure_signal_handlers
+    configure_signal_handlers(
+        grace_period=args.grace_period,
+        handle_sigusr=args.handle_sigusr,
+        forward_signals=not args.no_forward_signals,
+    )
+
     elastic_launch(
         config=config,
         entrypoint=cmd,
