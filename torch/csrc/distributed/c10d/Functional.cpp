@@ -316,13 +316,13 @@ TORCH_LIBRARY(_c10d_functional, m) {
   m.def(
       "shm_all_reduce(Tensor input, str reduce_op, str group_name) -> Tensor",
       torch::dispatch(
-          c10::DispatchKey::CompositeExplicitAutograd, ::shm_all_reduce),
+          c10::DispatchKey::CompositeExplicitAutograd, c10d::shm_all_reduce),
       {at::Tag::pt2_compliant_tag});
 
   m.def(
       "shm_all_reduce_(Tensor(a!) input, str reduce_op, str group_name) -> Tensor(a!)",
       torch::dispatch(
-          c10::DispatchKey::CompositeExplicitAutograd, ::shm_all_reduce_),
+          c10::DispatchKey::CompositeExplicitAutograd, c10d::shm_all_reduce_),
       {at::Tag::pt2_compliant_tag});
 
   m.def(
