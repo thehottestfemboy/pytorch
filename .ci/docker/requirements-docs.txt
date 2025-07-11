@@ -1,4 +1,4 @@
-sphinx==7.2.6
+sphinx==6.2.1
 #Description: This is used to generate PyTorch docs
 #Pinned versions: 6.2.1
 -e git+https://github.com/pytorch/pytorch_sphinx_theme.git@pytorch_sphinx_theme2#egg=pytorch_sphinx_theme2
