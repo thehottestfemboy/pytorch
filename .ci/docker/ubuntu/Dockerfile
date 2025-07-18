@@ -1,6 +1,6 @@
 ARG UBUNTU_VERSION
 
-FROM ubuntu:${UBUNTU_VERSION} as base
+FROM ubuntu:${UBUNTU_VERSION} as base1
 
 ARG UBUNTU_VERSION
 
@@ -106,14 +106,14 @@ ARG TRITON_CPU
 
 # Create a separate stage for building Triton and Triton-CPU.  install_triton
 # will check for the presence of env vars
-FROM base as triton-builder
+FROM base1 as triton-builder
 COPY ./common/install_triton.sh install_triton.sh
 COPY ./common/common_utils.sh common_utils.sh
 COPY ci_commit_pins/triton.txt triton.txt
 COPY ci_commit_pins/triton-cpu.txt triton-cpu.txt
 RUN bash ./install_triton.sh
 
-FROM base as final
+FROM base1 as base2
 COPY --from=triton-builder /opt/triton /opt/triton
 RUN if [ -n "${TRITON}" ] || [ -n "${TRITON_CPU}" ]; then pip install /opt/triton/*.whl; chown -R jenkins:jenkins /opt/conda; fi
 RUN rm -rf /opt/triton
@@ -154,6 +154,16 @@ RUN rm install_openblas.sh
 ENV INSTALLED_OPENBLAS ${OPENBLAS}
 
 # Install ccache/sccache (do this last, so we get priority in PATH)
+FROM base2 as sccache
+COPY ./common/install_cache.sh install_cache.sh
+RUN if [ -z "${SKIP_SCCACHE_INSTALL}" ]; then bash ./install_cache.sh; fi
+RUN rm install_cache.sh
+
+FROM base2 as final
+COPY --from=sccache /opt/cache /opt/cache
+ENV PATH /opt/cache/bin:$PATH
+
+# Install ccache/sccache (do this last, so we get priority in PATH)
 ARG SKIP_SCCACHE_INSTALL
 COPY ./common/install_cache.sh install_cache.sh
 ENV PATH /opt/cache/bin:$PATH
@@ -183,6 +193,7 @@ RUN if [ -n "${SKIP_LLVM_SRC_BUILD_INSTALL}" ]; then set -eu; rm -rf /opt/llvm; 
 ENV TORCH_CUDA_ARCH_LIST Maxwell
 ENV TORCH_NVCC_FLAGS "-Xfatbin -compress-all"
 ENV CUDA_PATH /usr/local/cuda
+ENV PATH /opt/cache/bin:$PATH
 
 USER jenkins
 CMD ["bash"]
