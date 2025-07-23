@@ -1117,6 +1117,7 @@ coverage_ignore_functions = [
     "z3op",
     "z3str",
     # torch.fx.graph_module
+    "reduce_deploy_graph_module",
     "reduce_graph_module",
     "reduce_package_graph_module",
     # torch.fx.node
