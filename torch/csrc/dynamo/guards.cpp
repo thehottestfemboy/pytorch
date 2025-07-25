@@ -2574,6 +2574,7 @@ class GuardManager {
         _is_dict(py::isinstance<py::dict>(example_value)),
         _is_immutable(is_immutable_object(example_value)),
         _is_nn_module(is_nn_module(example_value)),
+        _is_tensor(THPVariable_Check(example_value.ptr())),
         _type_str(get_type_str(example_value)) {
     if (_is_dict) {
       _dict_tag = get_dict_version_unchecked(example_value.ptr());
@@ -2633,8 +2634,35 @@ class GuardManager {
     return _is_empty_dict;
   }
 
+  bool is_guarded_value_tensor() {
+    return _is_tensor;
+  }
+
   std::string type_of_guarded_value() {
     return _type_str;
+  }
+
+ public:
+  // tag safety related helpers
+  // Seen docstring in guards.py ``find_tag_safe_roots`` for full context
+  void mark_tag_safe() {
+    _is_tag_safe = true;
+  }
+
+  void mark_tag_safe_root() {
+    if (!_is_tag_safe) {
+      throw std::runtime_error(
+          "Marking a node tag_safe_root when its not tag safe");
+    }
+    _is_tag_safe_root = true;
+  }
+
+  bool is_tag_safe() {
+    return _is_tag_safe;
+  }
+
+  bool is_tag_safe_root() {
+    return _is_tag_safe_root;
   }
 
  public:
@@ -2646,6 +2674,7 @@ class GuardManager {
       bool is_empty_dict,
       bool is_immutable,
       bool is_nn_module,
+      bool is_tensor,
       std::string type_str)
       : _root(root),
         _source(std::move(source)),
@@ -2653,6 +2682,7 @@ class GuardManager {
         _is_empty_dict(is_empty_dict),
         _is_immutable(is_immutable),
         _is_nn_module(is_nn_module),
+        _is_tensor(is_tensor),
         _type_str(std::move(type_str)) {}
 
   void clone_common(
@@ -2691,7 +2721,14 @@ class GuardManager {
         _is_empty_dict,
         _is_immutable,
         _is_nn_module,
+        _is_tensor,
         _type_str);
+    if (is_tag_safe()) {
+      cloned_mgr->mark_tag_safe();
+      if (is_tag_safe_root()) {
+        cloned_mgr->mark_tag_safe_root();
+      }
+    }
     clone_common(cloned_root, cloned_mgr, clone_filter_fn);
     return cloned_mgr;
   }
@@ -2979,8 +3016,13 @@ class GuardManager {
   bool _is_empty_dict = false;
   bool _is_immutable = false;
   bool _is_nn_module = false;
+  bool _is_tensor = false;
   std::string _type_str;
   uint64_t _dict_tag{0};
+
+  // tag safe markers
+  bool _is_tag_safe = false;
+  bool _is_tag_safe_root = false;
 };
 
 GuardAccessor::GuardAccessor(
@@ -3502,8 +3544,9 @@ class DictGuardManager : public GuardManager {
             std::move(source),
             true, // _is_dict
             is_empty_dict,
-            false, // _is_nn_module
             false, // _is_immutable
+            false, // _is_nn_module
+            false, // _is_tensor
             std::move(type_of)),
         _size(size),
         _expected_type(expected_type),
@@ -3526,7 +3569,12 @@ class DictGuardManager : public GuardManager {
         _indices,
         type_of_guarded_value(),
         is_guarded_value_empty_dict());
-
+    if (is_tag_safe()) {
+      cloned_mgr->mark_tag_safe();
+      if (is_tag_safe_root()) {
+        cloned_mgr->mark_tag_safe_root();
+      }
+    }
     clone_common(cloned_root, cloned_mgr, clone_filter_fn);
     for (auto index : _indices) {
       KeyValueManager& key_value_manager = _key_value_managers[index];
@@ -6055,6 +6103,12 @@ PyObject* torch_c_dynamo_guards_init() {
       .def(
           "is_guarded_value_empty_dict",
           &GuardManager::is_guarded_value_empty_dict)
+      .def("is_guarded_value_tensor", &GuardManager::is_guarded_value_tensor)
+      .def("has_no_accessors", &GuardManager::has_no_accessors)
+      .def("mark_tag_safe", &GuardManager::mark_tag_safe)
+      .def("mark_tag_safe_root", &GuardManager::mark_tag_safe_root)
+      .def("is_tag_safe", &GuardManager::is_tag_safe)
+      .def("is_tag_safe_root", &GuardManager::is_tag_safe_root)
       .def("type_of_guarded_value", &GuardManager::type_of_guarded_value)
       .def(
           "get_accessors",
