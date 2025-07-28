@@ -2,8 +2,7 @@
 # Python API
 
 ```{toctree}
-:glob:
-:maxdepth: 1
+:maxdepth: 2
 
 torch
 nn
