@@ -158,7 +158,10 @@ class PyInterpreterHolder {
             ConcretePyInterpreterVTable::instance())),
         is_main_interpreter_(
             at::impl::PythonOpRegistrationTrampoline::registerInterpreter(
-                impl_)) {}
+                impl_)) {
+    // Initialize the global function pointer for c10 PyObjectSlot
+    c10::impl::g_get_pyinterpreter_fn = &getPyInterpreter;
+  }
   PyInterpreterHolder(const PyInterpreterHolder&) = delete;
   PyInterpreterHolder(PyInterpreterHolder&&) = delete;
   PyInterpreterHolder& operator=(const PyInterpreterHolder&) = delete;
@@ -585,8 +588,7 @@ static void set_tensor_attr_with_capsule(
     const c10::TensorImpl* tensor,
     py::capsule& capsule,
     const char* attr_name) {
-  std::optional<PyObject*> mb_obj = tensor->pyobj_slot()->check_pyobj(
-      /*ignore_hermetic_tls=*/false);
+  std::optional<PyObject*> mb_obj = tensor->pyobj_slot()->check_pyobj();
   TORCH_CHECK(
       mb_obj.has_value(), "Tensor subclass's PyInterpreter has no value");
   auto obj = mb_obj.value();
@@ -613,8 +615,7 @@ static c10::ArrayRef<T> get_set_cached_attr(
     const c10::TensorImpl* tensor,
     const char* base_attr_name,
     const py::object& obj) {
-  std::optional<PyObject*> mb_obj =
-      tensor->pyobj_slot()->check_pyobj(getPyInterpreter());
+  std::optional<PyObject*> mb_obj = tensor->pyobj_slot()->check_pyobj();
   TORCH_CHECK(
       mb_obj.has_value(), "Tensor subclass's PyInterpreter has no value");
   auto tensor_obj = mb_obj.value();

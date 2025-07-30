@@ -10,6 +10,15 @@
 
 namespace c10::impl {
 
+// Function pointer type for getting the global interpreter
+using GetPyInterpreterFn = PyInterpreter* (*)();
+
+// Global function pointer (set by csrc initialization)
+C10_API extern GetPyInterpreterFn g_get_pyinterpreter_fn;
+
+// Helper function to get the global interpreter
+C10_API PyInterpreter* getPyInterpreter();
+
 struct C10_API PyObjectSlot {
  public:
   PyObjectSlot();
@@ -26,8 +35,7 @@ struct C10_API PyObjectSlot {
   // NB: THIS FUNCTION CAN RAISE AN EXCEPTION.  Make sure to clean up after
   // PyObject if necessary!
   void init_pyobj(PyObject* pyobj) {
-    pyobj_interpreter_.store(
-        getGlobalPyInterpreter(), std::memory_order_relaxed);
+    pyobj_interpreter_.store(getPyInterpreter(), std::memory_order_relaxed);
     pyobj_ = pyobj;
   }
 
@@ -55,18 +63,14 @@ struct C10_API PyObjectSlot {
 
   // @todo alban: I'm not too sure what's going on here, we can probably delete
   // it but it's worthwhile making sure
-  std::optional<PyObject*> check_pyobj(bool ignore_hermetic_tls = false) const {
+  std::optional<PyObject*> check_pyobj() const {
     impl::PyInterpreter* interpreter =
         pyobj_interpreter_.load(std::memory_order_acquire);
     if (interpreter == nullptr) {
       return std::nullopt;
     }
 
-    if (!ignore_hermetic_tls && c10::impl::HermeticPyObjectTLS::get_state()) {
-      return std::nullopt;
-    } else {
-      return _unchecked_untagged_pyobj();
-    }
+    return _unchecked_untagged_pyobj();
   }
 
   PyInterpreter& load_pyobj_interpreter() const;
