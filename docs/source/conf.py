@@ -66,10 +66,7 @@ extensions = [
     "sphinx.ext.linkcode",
     "sphinxcontrib.mermaid",
     "sphinx_sitemap",
-    "sphinx_remove_toctrees"
 ]
-
-remove_from_toctrees = ["generated/*"]
 
 myst_enable_extensions = [
     "colon_fence",
@@ -3341,6 +3338,8 @@ html_css_files = [
     "css/custom.css",
     "https://cdn.jsdelivr.net/npm/katex@0.10.0-beta/dist/katex.min.css",
 ]
+
+html_js_files = ["js/runllm-widget.js"]
 
 from sphinx.ext.coverage import CoverageBuilder
 
