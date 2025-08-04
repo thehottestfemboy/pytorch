@@ -168,9 +168,7 @@ static bool THPStorage_tryPreserve(THPStorage* self) {
   TORCH_INTERNAL_ASSERT(!storage_impl->pyobj_slot()->owns_pyobj());
 
   storage_impl->pyobj_slot()->set_owns_pyobj(true);
-  // When resurrecting, we MUST use _Py_NewReference and not Py_INCREF to
-  // ensure the PyObject is in a valid state
-  _Py_NewReference((PyObject*)self);
+  Py_INCREF(self);
 
   self->cdata = c10::MaybeOwned<c10::Storage>::borrowed(storage);
   return true;
@@ -204,7 +202,7 @@ static void THPStorage_subclass_dealloc(PyObject* self) {
     PyObject_GC_UnTrack(self);
   }
 
-  // base test is unnecessary as THPStorae does not set this
+  // base test is unnecessary as THPStorage does not set this
   if (type->tp_weaklistoffset) {
     PyObject_ClearWeakRefs(self);
   }
@@ -217,20 +215,6 @@ static void THPStorage_subclass_dealloc(PyObject* self) {
       return;
     }
     PyObject_GC_UnTrack(self);
-  }
-
-  if (has_finalizer) {
-    /* New weakrefs could be created during the finalizer call.
-       If this occurs, clear them out without calling their
-       finalizers since they might rely on part of the object
-       being finalized that has already been destroyed. */
-    if (type->tp_weaklistoffset) {
-      /* Modeled after GET_WEAKREFS_LISTPTR() */
-      PyWeakReference** list =
-          (PyWeakReference**)PyObject_GET_WEAKREFS_LISTPTR(self);
-      while (*list)
-        _PyWeakref_ClearRef(*list);
-    }
   }
 
   // Clear slots

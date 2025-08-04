@@ -2,7 +2,7 @@
 
 namespace c10::impl {
 
-PyObjectSlot::PyObjectSlot() : pyobj_interpreter_(nullptr), pyobj_(nullptr) {}
+PyObjectSlot::PyObjectSlot() : pyobj_interpreter_(nullptr), pyobj_(0) {}
 
 PyObjectSlot::~PyObjectSlot() {
   maybe_destroy_pyobj();
@@ -11,7 +11,7 @@ PyObjectSlot::~PyObjectSlot() {
 void PyObjectSlot::maybe_destroy_pyobj() {
   if (owns_pyobj()) {
     TORCH_INTERNAL_ASSERT(pyobj_interpreter_ != nullptr);
-    TORCH_INTERNAL_ASSERT(pyobj_ != nullptr);
+    TORCH_INTERNAL_ASSERT(pyobj_ != 0);
     (*pyobj_interpreter_.load(std::memory_order_acquire))
         ->decref(_unchecked_untagged_pyobj(), /*has_pyobj_slot*/ true);
     // NB: this destructor can only be entered when there are no
@@ -20,7 +20,7 @@ void PyObjectSlot::maybe_destroy_pyobj() {
     // then the PyObject holds an owning reference to the tensor).
     // So it is OK to clear pyobj_ here as it is impossible for it to
     // be used again (modulo weak reference races)
-    pyobj_ = nullptr; // for safety
+    pyobj_.store(0, std::memory_order_relaxed);  // for safety
   }
 }
 
@@ -30,8 +30,7 @@ PyInterpreter* PyObjectSlot::pyobj_interpreter() {
 
 PyObject* PyObjectSlot::_unchecked_untagged_pyobj() const {
   // NOLINTNEXTLINE(performance-no-int-to-ptr)
-  return reinterpret_cast<PyObject*>(
-      reinterpret_cast<uintptr_t>(pyobj_) & ~0x1ULL);
+  return reinterpret_cast<PyObject*>(pyobj_.load(std::memory_order_acquire) & ~0x1ULL);
 }
 
 PyInterpreter& PyObjectSlot::load_pyobj_interpreter() const {
@@ -43,14 +42,16 @@ PyInterpreter& PyObjectSlot::load_pyobj_interpreter() const {
 }
 
 bool PyObjectSlot::owns_pyobj() {
-  // NOLINTNEXTLINE(performance-no-int-to-ptr)
-  return reinterpret_cast<uintptr_t>(pyobj_) & 1;
+  return (pyobj_.load(std::memory_order_acquire) & 1) != 0;
 }
 
 void PyObjectSlot::set_owns_pyobj(bool b) {
-  // NOLINTNEXTLINE(performance-no-int-to-ptr)
-  pyobj_ = reinterpret_cast<PyObject*>(
-      reinterpret_cast<uintptr_t>(_unchecked_untagged_pyobj()) | b);
+  uintptr_t expected = pyobj_.load(std::memory_order_relaxed);
+  uintptr_t value;
+  do {
+    value = (expected & ~0x1ULL) | (b ? 1 : 0);
+  } while (!pyobj_.compare_exchange_weak(
+      expected, value, std::memory_order_release, std::memory_order_relaxed));
 }
 
 } // namespace c10::impl

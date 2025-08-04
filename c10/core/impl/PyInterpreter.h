@@ -29,6 +29,7 @@ using Stack = std::vector<c10::IValue>;
 namespace c10::impl {
 
 struct C10_API PyInterpreter;
+struct C10_API PyObjectSlot;
 
 // Note [Python interpreter tag]
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -129,6 +130,8 @@ struct C10_API PyInterpreterVTable {
   // Run Py_DECREF on a PyObject.  We DO NOT assume the GIL is held on call
   // See NOTE [PyInterpreter::decref takes a `has_pyobj_slot` arg]
   virtual void decref(PyObject* pyobj, bool has_pyobj_slot) const = 0;
+
+  virtual PyObject* fetch_or_init(PyObjectSlot* slot, PyObject* pyobj) const = 0;
 
   // Perform a detach by deferring to the __torch_dispatch__ implementation of
   // detach, which will also arrange for the PyObject to get copied in this

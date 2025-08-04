@@ -28,7 +28,7 @@ struct C10_API PyObjectSlot {
   void init_pyobj(PyObject* pyobj) {
     pyobj_interpreter_.store(
         getGlobalPyInterpreter(), std::memory_order_relaxed);
-    pyobj_ = pyobj;
+    pyobj_.store(reinterpret_cast<uintptr_t>(pyobj), std::memory_order_relaxed);
   }
 
   // Query the PyObject interpreter.  This may return null if there is no
@@ -100,11 +100,12 @@ struct C10_API PyObjectSlot {
   // care)
   std::atomic<PyInterpreter*> pyobj_interpreter_;
 
-  // This field contains a reference to a PyObject representing this Tensor.
+  // This field contains a reference to a PyObject representing this Tensor (or
+  // Storage) as a tagged integer. The least significant bit is used to
+  // indicate whether the C++ object owns the PyObject (1) or not (0).
+  //
   // If pyobj is nullptr, when we transfer Tensor to Python, we allocate a new
-  // PyObject for it and set this field.  This field does not have to be
-  // protected by an atomic as it is only allowed to be accessed when you hold
-  // the GIL, or during destruction of the tensor.
+  // PyObject for it and set this field.
   //
   // When a PyObject dies, you are obligated to clear this field
   // (otherwise, you will try to use-after-free the pyobj); this currently
@@ -118,7 +119,7 @@ struct C10_API PyObjectSlot {
   // owns the C++ object); see _unchecked_untagged_pyobj for raw access
   // or check_pyobj for checked access.  See references to PyObject
   // resurrection in torch/csrc/autograd/python_variable.cpp
-  PyObject* pyobj_;
+  std::atomic<uintptr_t> pyobj_;
 };
 
 } // namespace c10::impl

@@ -20,6 +20,10 @@ struct NoopPyInterpreterVTable final : public PyInterpreterVTable {
       "attempted to call " #m \
       " on a Tensor with nontrivial PyObject after corresponding interpreter died")
 
+  PyObject* fetch_or_init(PyObjectSlot* slot, PyObject* pyobj) const override {
+    PANIC(fetch_or_init);
+  }
+
   c10::intrusive_ptr<TensorImpl> detach(const TensorImpl* self) const override {
     PANIC(detach);
   }

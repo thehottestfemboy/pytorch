@@ -5,6 +5,7 @@
 #include <torch/csrc/autograd/generated/VariableType.h>
 #include <torch/csrc/utils/python_arg_parser.h>
 #include <torch/csrc/utils/python_dispatch.h>
+#include <c10/core/impl/PyObjectSlot.h>
 
 #include <string>
 
@@ -46,6 +47,7 @@ struct ConcretePyInterpreterVTable final
 
   void incref(PyObject* pyobj) const override;
   void decref(PyObject* pyobj, bool has_pyobj_slot) const override;
+  PyObject* fetch_or_init(PyObjectSlot* slot, PyObject* pyobj) const override;
 
   // TODO: Need to make this work for StorageImpl too. I imagine I'll want to
   // operate upon a PyObjectSlot rather than a TensorImpl
@@ -285,6 +287,13 @@ void ConcretePyInterpreterVTable::incref(PyObject* pyobj) const {
   pybind11::gil_scoped_acquire gil;
   Py_INCREF(pyobj);
 }
+
+PyObject* fetch_or_init(PyObjectSlot* slot, PyObject* pyobj) const {
+  TORCH_INTERNAL_ASSERT(PyThreadState_GET() != nullptr, 
+                        "fetch_or_init requires a valid Python context");
+  PyObject* existing = slot->
+}
+
 
 bool isPythonTensor(const at::Tensor& tensor) {
   return tensor.unsafeGetTensorImpl()->key_set().has(c10::DispatchKey::Python);
