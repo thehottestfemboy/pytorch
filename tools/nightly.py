@@ -38,6 +38,15 @@ well. This can be done with::
 
 Pulling will recreate a fresh virtual environment and reinstall the development
 dependencies as well as the nightly binaries into the repo directory.
+
+To install nightly binaries into your current environment (instead of creating a new venv),
+use the --inplace flag::
+
+    $ ./tools/nightly.py checkout --inplace
+    $ ./tools/nightly.py pull --inplace
+
+The --inplace flag will place the nightly binaries directly into the source directory
+and set up torch to be importable from the current environment.
 """
 
 from __future__ import annotations
@@ -46,7 +55,9 @@ import argparse
 import atexit
 import contextlib
 import functools
+import hashlib
 import itertools
+import json
 import logging
 import os
 import re
@@ -75,7 +86,20 @@ except ImportError:
     Version = None  # type: ignore[assignment,misc]
 
 
-REPO_ROOT = Path(__file__).absolute().parent.parent
+@functools.lru_cache
+def _find_repo_root() -> Path:
+    """Find the root of the git repository where this script is located."""
+    script_dir = Path.cwd().absolute()
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=script_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return Path(result.stdout.strip()).absolute()
+
+
 GITHUB_REMOTE_URL = "https://github.com/pytorch/pytorch.git"
 PACKAGES_TO_INSTALL = (
     "torch",
@@ -93,10 +117,65 @@ PACKAGES_TO_INSTALL = (
     "clang-tidy",
     "sphinx",
 )
-DEFAULT_VENV_DIR = REPO_ROOT / "venv"
 
 
-LOGGER: logging.Logger | None = None
+@functools.lru_cache
+def default_venv_dir() -> Path:
+    """Get the default virtual environment directory."""
+    return _find_repo_root() / "venv"
+
+
+@functools.lru_cache
+def wheel_cache_dir() -> Path:
+    """Get the wheel cache directory."""
+    if WINDOWS:
+        cache_home = Path(
+            os.getenv("LOCALAPPDATA") or Path.home() / "AppData" / "Local"
+        )
+    else:
+        cache_home = Path(os.getenv("XDG_CACHE_HOME") or Path.home() / ".cache")
+    cache_dir = cache_home / "pytorch-nightly" / "wheel-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def get_wheel_cache_key(wheel_path: Path) -> str:
+    """Get a cache key for the wheel file."""
+    # Wheel filenames already uniquely identify the content
+    # e.g., torch-2.2.0.dev20231201+cpu-cp311-cp311-linux_x86_64.whl
+    return wheel_path.stem  # Remove .whl extension
+
+
+def cleanup_wheel_cache() -> None:
+    """Clean up old wheel cache entries, keeping only the 10 most recent."""
+    cache_dir = wheel_cache_dir()
+    if not cache_dir.exists():
+        return
+
+    # Get all cache entries sorted by modification time (newest first)
+    cache_entries = []
+    for entry in cache_dir.iterdir():
+        if entry.is_dir():
+            try:
+                mtime = entry.stat().st_mtime
+                cache_entries.append((mtime, entry))
+            except OSError:
+                # Entry might have been deleted, skip it
+                continue
+
+    cache_entries.sort(reverse=True)  # Sort by mtime, newest first
+
+    # Keep only the 10 most recent entries
+    for _, old_entry in cache_entries[10:]:
+        try:
+            shutil.rmtree(old_entry, ignore_errors=True)
+            print(f"Cleaned up old wheel cache entry: {old_entry.name}")
+        except OSError:
+            # Ignore errors during cleanup
+            logging.exception("Couldn't clean old cache entry %s", old_entry.name)  # noqa: LOG015
+
+
+LOGGER: logging.Logger = None  # type: ignore[assign]
 VERBOSE: bool = False
 DATETIME_FORMAT = "%Y-%m-%d_%Hh%Mm%Ss"
 SHA1_RE = re.compile(r"(?P<sha1>[0-9a-fA-F]{40})")
@@ -197,7 +276,7 @@ class Formatter(logging.Formatter):
 
 
 @contextlib.contextmanager
-def timer(logger: logging.Logger, prefix: str) -> Iterator[None]:
+def timer(logger, prefix: str) -> Iterator[None]:
     """Timed context manager"""
     start_time = time.perf_counter()
     yield
@@ -566,6 +645,7 @@ class Venv:
             pip_args.append("--pre")
         if no_deps:
             pip_args.append("--no-deps")
+        pip_args.extend(packages)
         self.pip("download", f"--dest={tempdir}", *pip_args, *packages, **popen_kwargs)
         files = list(tempdir.iterdir())
         print(f"Downloaded {len(files)} file(s) to {tempdir}:")
@@ -596,25 +676,50 @@ class Venv:
 
     @contextlib.contextmanager
     def extracted_wheel(self, wheel: Path | str) -> Generator[Path]:
-        """Download and extract a wheel into a temporary directory."""
-        with tempfile.TemporaryDirectory(prefix="wheel-") as tempdir:
-            self.wheel_unpack(wheel, tempdir)
-            subdirs = [p for p in Path(tempdir).absolute().iterdir() if p.is_dir()]
+        """Download and extract a wheel, using disk cache if available."""
+        wheel_path = Path(wheel).absolute()
+        cache_dir = wheel_cache_dir()
+        cache_key = get_wheel_cache_key(wheel_path)
+        cached_wheel_dir = cache_dir / cache_key
+
+        # Check if we have a cached extraction
+        if cached_wheel_dir.exists():
+            subdirs = [p for p in cached_wheel_dir.iterdir() if p.is_dir()]
+            if len(subdirs) == 1:
+                print(f"Using cached wheel extraction: {cached_wheel_dir}")
+                yield subdirs[0]
+                return
+            else:
+                # Cache is corrupted, remove it
+                shutil.rmtree(cached_wheel_dir, ignore_errors=True)
+
+        # Extract to cache directory
+        print(f"Extracting wheel to cache: {cached_wheel_dir}")
+        cached_wheel_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.wheel_unpack(wheel_path, cached_wheel_dir)
+            subdirs = [p for p in cached_wheel_dir.iterdir() if p.is_dir()]
             if len(subdirs) != 1:
                 raise RuntimeError(
-                    f"Expected exactly one directory in {tempdir}, "
+                    f"Expected exactly one directory in {cached_wheel_dir}, "
                     f"got {[str(d) for d in subdirs]}."
                 )
+            # Clean up old cache entries after successful extraction
+            cleanup_wheel_cache()
             yield subdirs[0]
+        except Exception:
+            # Clean up on failure
+            shutil.rmtree(cached_wheel_dir, ignore_errors=True)
+            raise
 
 
 def git(*args: str) -> list[str]:
-    return ["git", "-C", str(REPO_ROOT), *args]
+    return ["git", "-C", str(_find_repo_root()), *args]
 
 
 @functools.lru_cache
 def logging_base_dir() -> Path:
-    base_dir = REPO_ROOT / "nightly" / "log"
+    base_dir = _find_repo_root() / "nightly" / "log"
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir
 
@@ -696,6 +801,86 @@ def logging_manager(*, debug: bool = False) -> Generator[logging.Logger, None, N
         sys.exit(1)
 
 
+def get_torch_install_info(venv: Venv) -> tuple[str, Path | None]:
+    """Get information about the current torch installation using importlib.
+
+    Returns:
+        Tuple of (install_type, install_path) where:
+        - install_type: 'none', 'regular', 'editable_ours', 'editable_other'
+        - install_path: Path to torch installation, or None if not installed
+    """
+    try:
+        # Run this check in the venv's Python environment
+        # Change cwd to avoid picking up local torch module
+        with tempfile.TemporaryDirectory() as temp_cwd:
+            result = venv.python(
+                "-c",
+                """
+import json
+from importlib import metadata, util
+from pathlib import Path
+
+try:
+    spec = util.find_spec("torch")
+    if spec is None or spec.origin is None:
+        print(json.dumps({"type": "none", "path": None}))
+        exit()
+
+    torch_path = Path(spec.origin).parent
+    dist = metadata.distribution("torch")
+
+    # Check for PEP-610 direct_url.json for editable installs
+    try:
+        direct_url_txt = dist.read_text("direct_url.json")
+        if direct_url_txt:
+            info = json.loads(direct_url_txt)
+            if info.get("dir_info", {}).get("editable", False):
+                repo_root = Path(str(_find_repo_root())).absolute()
+                if torch_path.is_relative_to(repo_root):
+                    install_type = "editable_ours"
+                else:
+                    install_type = "editable_other"
+                print(json.dumps({"type": install_type, "path": str(torch_path)}))
+                exit()
+    except Exception:
+        # direct_url.json may not exist or be readable, continue to regular check
+        pass
+
+    # If we get here, it's a regular wheel or sdist install
+    print(json.dumps({"type": "regular", "path": str(torch_path)}))
+
+except ModuleNotFoundError:
+    print(json.dumps({"type": "none", "path": None}))
+except Exception as e:
+    print(json.dumps({"type": "error", "path": None, "error": str(e)}))
+                """,
+                capture_output=True,
+                check=False,
+                cwd=temp_cwd,
+            )
+
+        if result.returncode != 0:
+            return "none", None
+
+        try:
+            info = json.loads(result.stdout.strip())
+            install_type = info["type"]
+            path_str = info["path"]
+
+            if install_type == "none" or path_str is None:
+                return "none", None
+            elif install_type == "error":
+                return "none", None
+            else:
+                return install_type, Path(path_str)
+
+        except (json.JSONDecodeError, KeyError):
+            return "none", None
+
+    except Exception:
+        return "none", None
+
+
 def check_branch(subcommand: str, branch: str | None) -> str | None:
     """Checks that the branch name can be checked out."""
     if subcommand != "checkout":
@@ -765,8 +950,11 @@ def _nightly_version(site_dir: Path) -> str:
 
 
 @timed("Checking out nightly PyTorch")
-def checkout_nightly_version(branch: str | None, site_dir: Path) -> None:
-    """Gets the nightly version and then checks it out."""
+def checkout_nightly_version(branch: str | None, site_dir: Path) -> str:
+    """Get's the nightly version and then checks it out.
+
+    Returns the nightly version SHA that was checked out.
+    """
     nightly_version = _nightly_version(site_dir)
     if branch is None:
         # Detached mode - explicitly use --detach flag
@@ -775,6 +963,7 @@ def checkout_nightly_version(branch: str | None, site_dir: Path) -> None:
         # Branch mode
         cmd = git("checkout", "-b", branch, nightly_version)
     subprocess.check_call(cmd)
+    return nightly_version
 
 
 @timed("Pulling nightly PyTorch")
@@ -896,7 +1085,7 @@ def move_nightly_files(site_dir: Path) -> None:
     """Moves PyTorch files from temporary installed location to repo."""
     # get file listing
     source_dir = site_dir / "torch"
-    target_dir = REPO_ROOT / "torch"
+    target_dir = _find_repo_root() / "torch"
     listing = _get_listing(source_dir, target_dir)
     # copy / link files
     if WINDOWS:
@@ -908,14 +1097,106 @@ def move_nightly_files(site_dir: Path) -> None:
             _copy_files(listing, source_dir, target_dir)
 
 
-@timed("Writing pytorch-nightly.pth")
+@timed("Installing torch distribution metadata")
+def install_torch_metadata(wheel_site_dir: Path, venv: Venv) -> None:
+    """Install torch distribution metadata from the wheel."""
+    # Find the torch dist-info directory in the extracted wheel
+    dist_info_dirs = list(wheel_site_dir.glob("torch-*.dist-info"))
+    if len(dist_info_dirs) != 1:
+        raise RuntimeError(
+            f"Expected exactly one torch dist-info directory, got {dist_info_dirs}"
+        )
+
+    source_dist_info = dist_info_dirs[0]
+
+    try:
+        target_site_packages = venv.site_packages()
+    except Exception:
+        # Fallback to using current Python's site-packages for inplace mode
+        import site
+
+        site_packages_dirs = site.getsitepackages()
+        if not site_packages_dirs:
+            site_packages_dirs = [site.getusersitepackages()]
+        target_site_packages = Path(site_packages_dirs[0])
+
+    target_dist_info = target_site_packages / source_dist_info.name
+
+    # Remove existing dist-info if present
+    _remove_existing(target_dist_info)
+
+    # Copy the entire dist-info directory
+    shutil.copytree(source_dist_info, target_dist_info)
+
+    # Create direct_url.json to indicate this is an editable install
+    direct_url_json = {
+        "dir_info": {"editable": True},
+        "url": f"file://{_find_repo_root()}",
+    }
+
+    direct_url_file = target_dist_info / "direct_url.json"
+    direct_url_file.write_text(json.dumps(direct_url_json, indent=2), encoding="utf-8")
+
+    # Update RECORD file to include torch.pth and direct_url.json
+
+    record_file = target_dist_info / "RECORD"
+    if record_file.exists():
+        # Read existing RECORD entries and filter out torch/ and torchgen/ entries
+        existing_records = record_file.read_text(encoding="utf-8").strip().split("\n")
+        # Remove entries for torch/ and torchgen/ since we don't install them to site-packages
+        filtered_records = [
+            record
+            for record in existing_records
+            if not record.startswith(("torch/", "torchgen/", "functorch/"))
+        ]
+    else:
+        filtered_records = []
+
+    # Add our new files to the RECORD
+    torch_pth_path = target_site_packages / "torch.pth"
+
+    # Calculate hash and size for torch.pth
+    if torch_pth_path.exists():
+        torch_pth_content = torch_pth_path.read_bytes()
+        torch_pth_hash = hashlib.sha256(torch_pth_content).hexdigest()
+        torch_pth_size = len(torch_pth_content)
+        torch_pth_record = f"torch.pth,sha256={torch_pth_hash},{torch_pth_size}"
+    else:
+        torch_pth_record = "torch.pth,,"
+
+    # Calculate hash and size for direct_url.json
+    direct_url_content = direct_url_file.read_bytes()
+    direct_url_hash = hashlib.sha256(direct_url_content).hexdigest()
+    direct_url_size = len(direct_url_content)
+    direct_url_relative = direct_url_file.relative_to(target_site_packages)
+    direct_url_record = (
+        f"{direct_url_relative},sha256={direct_url_hash},{direct_url_size}"
+    )
+
+    # Create new RECORD entries
+    new_records = [
+        torch_pth_record,
+        direct_url_record,
+    ]
+
+    # Combine and write updated RECORD
+    all_records = filtered_records + new_records
+    record_content = "\n".join(all_records) + "\n"
+    record_file.write_text(record_content, encoding="utf-8")
+
+    print(f"Installed torch metadata: {target_dist_info}")
+    print(f"Created editable install marker: {direct_url_file}")
+    print("Updated RECORD file with torch.pth and direct_url.json")
+
+
+@timed("Writing torch.pth")
 def write_pth(venv: Venv) -> None:
     """Writes Python path file for this dir."""
-    (venv.site_packages() / "pytorch-nightly.pth").write_text(
+    (venv.site_packages() / "torch.pth").write_text(
         "# This file was autogenerated by PyTorch's tools/nightly.py\n"
         "# Please delete this file if you no longer need the following development\n"
         "# version of PyTorch to be importable\n"
-        f"{REPO_ROOT}\n",
+        f"{_find_repo_root()}\n",
         encoding="utf-8",
     )
 
@@ -962,51 +1243,148 @@ def parse_dependencies(
     return [dep.strip() for dep in dependencies]
 
 
+def uninstall_torch(venv: Venv) -> None:
+    """Uninstall existing torch installation."""
+    LOGGER.info("Uninstalling existing torch installation...")
+    try:
+        venv.pip("uninstall", "torch", "-y")
+
+    except subprocess.CalledProcessError:
+        LOGGER.warning("Failed to uninstall torch", exc_info=True)
+
+
+@timed("Setting up editable torch install")
+def setup_editable_torch(venv: Venv) -> None:
+    """Set up torch to be importable from the repo directory."""
+    install_type, install_path = get_torch_install_info(venv)
+
+    if install_type == "editable_ours":
+        LOGGER.info(
+            "Torch is already set up as editable install pointing to this repository"
+        )
+        return
+    elif install_type == "editable_other":
+        LOGGER.info(
+            "Found editable torch install pointing to different directory: %s",
+            install_path,
+        )
+        LOGGER.info("Overriding with editable install pointing to this repository")
+        uninstall_torch(venv)
+    elif install_type == "regular":
+        LOGGER.info("Found regular torch install at: %s", install_path)
+        LOGGER.info(
+            "Uninstalling and replacing with editable install pointing to this repository"
+        )
+        uninstall_torch(venv)
+    else:
+        LOGGER.info("No existing torch installation found")
+
+    # Set up .pth file to make our repo's torch importable
+    site_packages = venv.site_packages()
+    # NOTE: Don't change this to pytorch-nightly, torch is more inline
+    # with what pip install -e . would have created
+    pth_file = site_packages / "torch.pth"
+
+    # Ensure the site-packages directory exists
+    site_packages.mkdir(parents=True, exist_ok=True)
+
+    pth_file.write_text(
+        "# This file was autogenerated by PyTorch's tools/nightly.py\n"
+        "# Please delete this file if you no longer need the following development\n"
+        "# version of PyTorch to be importable\n"
+        f"{_find_repo_root()}\n",
+        encoding="utf-8",
+    )
+
+    LOGGER.info("Created .pth file at: %s", pth_file)
+
+
 def install(
     *,
-    venv: Venv,
+    venv: Venv | None,
     packages: Iterable[str],
     subcommand: str = "checkout",
     branch: str | None = None,
+    inplace: bool = False,
 ) -> None:
     """Development install of PyTorch"""
-    use_existing = subcommand == "checkout"
-    if use_existing:
-        venv.ensure()
-    else:
-        venv.create(remove_if_exists=True)
+    if inplace:
+        # Inplace mode: use current environment
+        if venv is None:
+            raise RuntimeError("venv cannot be None in inplace mode")
 
-    packages = [p for p in packages if p != "torch"]
+        LOGGER.info("Using current environment for in-place installation")
+        venv.ensure()
+
+        # Set up editable torch install (handles all edge cases)
+        setup_editable_torch(venv)
+    else:
+        # Original venv mode
+        if venv is None:
+            raise RuntimeError("venv cannot be None in non-inplace mode")
+
+        use_existing = subcommand == "checkout"
+        if use_existing:
+            venv.ensure()
+        else:
+            venv.create(remove_if_exists=True)
+
+        packages_list = [p for p in packages if p != "torch"]
+        install_packages(venv, packages_list)
+
+    # Common logic for both modes: download wheel and extract binaries
+    if venv is None:
+        raise RuntimeError("venv cannot be None")
 
     downloaded_files = venv.pip_download("torch", prerelease=True, no_deps=True)
-    if len(downloaded_files) != 1:
-        raise RuntimeError(f"Expected exactly one torch wheel, got {downloaded_files}")
-    torch_wheel = downloaded_files[0]
-    if not (
-        torch_wheel.name.startswith("torch-") and torch_wheel.name.endswith(".whl")
-    ):
+    torch_wheel = [
+        file
+        for file in downloaded_files
+        if file.name.startswith("torch-") and file.name.endswith(".whl")
+    ]
+    if len(torch_wheel) != 1:
         raise RuntimeError(f"Expected exactly one torch wheel, got {torch_wheel}")
 
-    with venv.extracted_wheel(torch_wheel) as wheel_site_dir:
+    nightly_version = None
+    with venv.extracted_wheel(torch_wheel[0]) as wheel_site_dir:
         dependencies = parse_dependencies(venv, wheel_site_dir)
         install_packages(venv, [*dependencies, *packages])
 
         if subcommand == "checkout":
-            checkout_nightly_version(branch, wheel_site_dir)
+            nightly_version = checkout_nightly_version(branch, wheel_site_dir)
         elif subcommand == "pull":
             pull_nightly_version(wheel_site_dir)
         else:
             raise ValueError(f"Subcommand {subcommand} must be one of: checkout, pull.")
         move_nightly_files(wheel_site_dir)
+        # Install torch distribution metadata so importlib can find it
+        install_torch_metadata(wheel_site_dir, venv)
 
-    write_pth(venv)
-    cast(logging.Logger, LOGGER).info(
-        "-------\n"
-        "PyTorch Development Environment set up!\n"
-        "Please activate to enable this environment:\n\n"
-        "  $ %s\n",
-        venv.activate_command,
-    )
+    if not inplace:
+        write_pth(venv)
+        cast(logging.Logger, LOGGER).info(
+            "-------\n"
+            "PyTorch Development Environment set up!\n"
+            "Please activate to enable this environment:\n\n"
+            "  $ %s",
+            venv.activate_command,
+        )
+    else:
+        message = (
+            "-------\n"
+            "PyTorch nightly binaries installed in-place!\n"
+            "The current environment now has nightly PyTorch binaries."
+        )
+
+        # Add cherry-pick instructions for checkout --inplace with no -b argument
+        if subcommand == "checkout" and branch is None and nightly_version:
+            message += (
+                "\n\n"
+                "To cherry-pick your old commits onto this nightly commit, run:\n\n"
+                "  git cherry-pick origin/main..HEAD@{1}"
+            )
+
+        cast(logging.Logger, LOGGER).info(message)
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -1054,7 +1432,7 @@ def make_parser() -> argparse.ArgumentParser:
             type=lambda p: Path(p).absolute(),
             help='Path to virtual environment directory (e.g. "./venv")',
             dest="prefix",
-            default=str(DEFAULT_VENV_DIR),
+            default=str(default_venv_dir()),
             metavar="PATH",
         )
         subparser.add_argument(
@@ -1087,6 +1465,15 @@ def make_parser() -> argparse.ArgumentParser:
             default=argparse.SUPPRESS,
             metavar="VERSION",
         )
+        subparser.add_argument(
+            "--inplace",
+            help=(
+                "Install nightly binaries into the current environment instead of creating a new venv."
+            ),
+            dest="inplace",
+            default=False,
+            action="store_true",
+        )
     return parser
 
 
@@ -1094,6 +1481,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = make_parser()
     args = parser.parse_args()
     args.branch = getattr(args, "branch", None)
+    args.inplace = getattr(args, "inplace", False)
     if hasattr(args, "cuda") and hasattr(args, "rocm"):
         parser.error("Cannot specify both CUDA and ROCm versions.")
     return args
@@ -1139,16 +1527,27 @@ def main() -> None:
 
     with logging_manager(debug=args.verbose) as logger:
         LOGGER = logger
-        venv = Venv(
-            prefix=args.prefix,
-            pip_source=pip_source,
-            base_executable=args.base_executable,
-        )
+
+        if args.inplace:
+            # For inplace mode, create a temporary Venv object using current Python
+            venv = Venv(
+                prefix=Path(sys.prefix),  # Use current environment
+                pip_source=pip_source,
+                base_executable=sys.executable,
+            )
+        else:
+            venv = Venv(
+                prefix=args.prefix,
+                pip_source=pip_source,
+                base_executable=args.base_executable,
+            )
+
         install(
             venv=venv,
             packages=PACKAGES_TO_INSTALL,
             subcommand=args.subcmd,
             branch=args.branch,
+            inplace=args.inplace,
         )
 
 
