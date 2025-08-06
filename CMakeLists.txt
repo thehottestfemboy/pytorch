@@ -564,7 +564,7 @@ if(MSVC)
   set(CMAKE_NINJA_CMCLDEPS_RC OFF)
   if(MSVC_Z7_OVERRIDE)
     # CMake set debug flags to use /Z7
-    set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)
+    set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
   endif()
   foreach(
     flag_var
@@ -700,7 +700,7 @@ endif()
 if(USE_KLEIDIAI AND CMAKE_C_COMPILER_VERSION)
     if(CMAKE_C_COMPILER_VERSION VERSION_LESS 11)
       set(USE_KLEIDIAI OFF)
-      message(WARNING "Disabling KleidiAI: Requires atleast GCC 11 or Clang 11")
+      message(WARNING "Disabling KleidiAI: Requires at least GCC 11 or Clang 11")
     endif()
 endif()
 
@@ -872,6 +872,14 @@ cmake_dependent_option(
   "USE_CUDA OR USE_ROCM;NOT MSVC"
   OFF)
 
+cmake_dependent_option(
+  USE_FBGEMM_GENAI
+  "Whether to build FBGEMM GenAI quantized GEMM kernels.\
+  Will be disabled if not supported by the platform"
+  OFF
+  "USE_CUDA OR USE_ROCM"
+  OFF)
+
 # CAVEAT: Again, Flash Attention2 will error while building for sm52 while Mem
 # Eff Attention won't
 cmake_dependent_option(
@@ -903,6 +911,10 @@ endif(DEBUG_CUDA)
 
 if(USE_FBGEMM)
   string(APPEND CMAKE_CXX_FLAGS " -DUSE_FBGEMM")
+endif()
+
+if(USE_FBGEMM_GENAI)
+  string(APPEND CMAKE_CXX_FLAGS " -DUSE_FBGEMM_GENAI")
 endif()
 
 if(USE_PYTORCH_QNNPACK)
@@ -985,6 +997,9 @@ endif()
 # ---[ Build flags Re-include to override append_cxx_flag_if_supported from
 # third_party/FBGEMM
 include(cmake/public/utils.cmake)
+if(USE_COLORIZE_OUTPUT)
+  set(CMAKE_COLOR_DIAGNOSTICS ON)
+endif()
 if(NOT MSVC)
   string(APPEND CMAKE_CXX_FLAGS " -O2 -fPIC")
 
@@ -1059,19 +1074,6 @@ if(NOT MSVC)
   append_cxx_flag_if_supported("-Wno-aligned-allocation-unavailable"
                                CMAKE_CXX_FLAGS)
   append_cxx_flag_if_supported("-Qunused-arguments" CMAKE_CXX_FLAGS)
-
-  if(${USE_COLORIZE_OUTPUT})
-    # Why compiler checks are necessary even when `try_compile` is used Because
-    # of the bug in ccache that can incorrectly identify `-fcolor-diagnostics`
-    # As supported by GCC, see https://github.com/ccache/ccache/issues/740 (for
-    # older ccache) and https://github.com/ccache/ccache/issues/1275 (for newer
-    # ones)
-    if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
-      append_cxx_flag_if_supported("-fdiagnostics-color=always" CMAKE_CXX_FLAGS)
-    else()
-      append_cxx_flag_if_supported("-fcolor-diagnostics" CMAKE_CXX_FLAGS)
-    endif()
-  endif()
 
   append_cxx_flag_if_supported("-faligned-new" CMAKE_CXX_FLAGS)
 
@@ -1200,10 +1202,6 @@ if(APPLE)
   append_cxx_flag_if_supported("-Wno-missing-braces" CMAKE_CXX_FLAGS)
 endif()
 
-if(USE_XPU)
-  string(APPEND CMAKE_CXX_FLAGS " -DUSE_XPU")
-endif()
-
 if(EMSCRIPTEN)
   string(
     APPEND
@@ -1255,10 +1253,11 @@ if(USE_MIMALLOC AND USE_MIMALLOC_ON_MKL)
 endif()
 
 # ---[ Main build
+add_subdirectory(torch/headeronly)  # headeronly headers
 add_subdirectory(c10)
 add_subdirectory(caffe2)
 
-# ---[ CMake related files Uninistall option.
+# ---[ CMake related files Uninstall option.
 if(NOT TARGET caffe2_uninstall)
   configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmake_uninstall.cmake.in

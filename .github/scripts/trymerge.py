@@ -634,7 +634,7 @@ def _revlist_to_prs(
             raise RuntimeError(
                 f"Found an unexpected number of PRs mentioned in commit {rev}: "
                 f"{len(all_matches)}.  This is probably because you are using an "
-                "old verion of ghstack.  Please update ghstack and resubmit "
+                "old version of ghstack.  Please update ghstack and resubmit "
                 "your PRs"
             )
 
@@ -1891,7 +1891,9 @@ def validate_revert(
         else pr.get_comment_by_id(comment_id)
     )
     if comment.editor_login is not None:
-        raise PostCommentError("Don't want to revert based on edited command")
+        raise PostCommentError(
+            "Halting the revert as the revert comment has been edited."
+        )
     author_association = comment.author_association
     author_login = comment.author_login
     allowed_reverters = ["COLLABORATOR", "MEMBER", "OWNER"]

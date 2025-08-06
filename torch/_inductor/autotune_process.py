@@ -12,6 +12,7 @@ import queue
 import selectors
 import subprocess
 import sys
+import sysconfig
 import time
 import warnings
 from collections.abc import Iterable, Sequence
@@ -128,6 +129,8 @@ class TuningProcess:
             "PYTHONPATH": os.environ.get(
                 "TORCH_CUSTOM_PYTHONPATH", os.pathsep.join(sys.path)
             ),
+            # Need to set this for internal builds that bundle the runtime.
+            "PYTHONHOME": sysconfig.get_path("data"),
             # We shouldn't be using the Triton async compile subprocess pool,
             # but as a precaution set the env var that disables its creation.
             "TORCH_WARM_POOL": "0",
@@ -585,7 +588,7 @@ class TritonBenchmarkRequest(BenchmarkRequest):
         num_buffers_warp_spec: int = 0,
         matrix_instr_nonkdim: int = 0,  # only used for hip to choose the shape of mfma instruction.
         waves_per_eu: int = 0,  # only used for hip to schedule waves per execution unit
-        kpack: int = 0,  # ROCm specific gemm paramete
+        kpack: int = 0,  # ROCm specific gemm parameter
     ) -> None:
         super().__init__(kernel_name, input_tensor_meta, output_tensor_meta, extra_args)
         self.module_path = module_path

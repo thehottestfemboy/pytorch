@@ -5,11 +5,6 @@ set -x
 # shellcheck source=./macos-common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/macos-common.sh"
 
-if [[ -n "$CONDA_ENV" ]]; then
-  # Use binaries under conda environment
-  export PATH="$CONDA_ENV/bin":$PATH
-fi
-
 # Test that OpenMP is enabled
 pushd test
 if [[ ! $(python -c "import torch; print(int(torch.backends.openmp.is_available()))") == "1" ]]; then
@@ -162,6 +157,29 @@ test_jit_hooks() {
   assert_git_not_dirty
 }
 
+# Shellcheck doesn't like it when you pass no arguments to a function
+# that can take args. See https://www.shellcheck.net/wiki/SC2120
+# shellcheck disable=SC2120
+checkout_install_torchbench() {
+  local commit
+  commit=$(cat .ci/docker/ci_commit_pins/torchbench.txt)
+  git clone https://github.com/pytorch/benchmark torchbench
+  pushd torchbench
+  git checkout "$commit"
+
+  if [ "$1" ]; then
+    python install.py --continue_on_fail models "$@"
+  else
+    # Occasionally the installation may fail on one model but it is ok to continue
+    # to install and test other models
+    python install.py --continue_on_fail
+  fi
+
+  echo "Print all dependencies after TorchBench is installed"
+  python -mpip freeze
+  popd
+}
+
 torchbench_setup_macos() {
   git clone --recursive https://github.com/pytorch/vision torchvision
   git clone --recursive https://github.com/pytorch/audio torchaudio
@@ -184,13 +202,11 @@ torchbench_setup_macos() {
   USE_OPENMP=0 python setup.py develop
   popd
 
-  # Shellcheck doesn't like it when you pass no arguments to a function that can take args. See https://www.shellcheck.net/wiki/SC2120
-  # shellcheck disable=SC2119,SC2120
   checkout_install_torchbench
 }
 
 pip_benchmark_deps() {
-  python -mpip install --no-input astunparse requests cython scikit-learn
+  python -mpip install --no-input requests cython scikit-learn six
 }
 
 

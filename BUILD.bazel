@@ -500,7 +500,7 @@ filegroup(
 # To achieve finer granularity and make debug easier, caffe2 is split into three libraries:
 # ATen, caffe2 and caffe2_for_aten_headers. ATen lib group up source codes under
 # aten/ directory and caffe2 contains most files under `caffe2/` directory. Since the
-# ATen lib and the caffe2 lib would depend on each other, `caffe2_for_aten_headers` is splitted
+# ATen lib and the caffe2 lib would depend on each other, `caffe2_for_aten_headers` is split
 # out from `caffe2` to avoid dependency cycle.
 cc_library(
     name = "caffe2_for_aten_headers",
@@ -672,14 +672,6 @@ flatbuffer_cc_library(
 )
 
 cc_library(
-    name = "torch_standalone_headers",
-    hdrs = glob([
-        "torch/standalone/**/*.h"
-    ]),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "torch_headers",
     hdrs = if_cuda(
         torch_cuda_headers,
@@ -687,6 +679,7 @@ cc_library(
         [
             "torch/*.h",
             "torch/csrc/**/*.h",
+            "torch/nativert/**/*.h",
             "torch/csrc/distributed/c10d/**/*.hpp",
             "torch/lib/libshm/*.h",
         ],
