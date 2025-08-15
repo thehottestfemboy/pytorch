@@ -493,22 +493,31 @@ def prepare_fw_with_masks(fn):
     return fw_with_masks
 
 
+def _is_float_tensor(t: Any):
+    return isinstance(t, torch.Tensor) and t.dtype.is_floating_point
+
+
 def prepare_fw_with_masks_all_requires_grad(fn):
     def fw_with_masks(*args):
         fw_out = fn(*args)
         # Note [force all outputs to be require grad]
-        # Instead of using the original fn, we set the output of original
+        # Instead of using the original fn, we set the float tensor output of original
         # fn to all require grad. This is consistent with the behavior
         # of autograd.Function, where if any one of the inputs requires grad
         # all output will be require grad. This also makes the downstream
         # require_gradness reasoning much easier.
         if pytree.tree_any_only(torch.Tensor, lambda t: t.requires_grad, args):
-            fw_out = pytree.tree_map_only(
-                torch.Tensor, lambda x: x.requires_grad_(True), fw_out
+            fw_out = pytree.tree_map(
+                lambda x: x.requires_grad_(True) if _is_float_tensor(x) else x, fw_out
             )
-        return fw_out, pytree.tree_map_only(
-            torch.Tensor, lambda x: x.requires_grad, fw_out
-        )
+            fw_masks = pytree.tree_map(
+                lambda x: x.requires_grad if _is_float_tensor(x) else False, fw_out
+            )
+            return fw_out, fw_masks
+        else:
+            raise RuntimeError(
+                f"Requires the fw function to have at least one tensor input that requires grad but got {args}"
+            )
 
     return fw_with_masks
 
@@ -1218,3 +1227,13 @@ def _has_gen_schema(op: HigherOrderOperator):
     return hasattr(type(op), method) and getattr(type(op), method) is not getattr(
         HigherOrderOperator, method
     )
+
+
+def filter_with_masks(data: list[Optional[torch.Tensor]], masks: list[bool]):
+    assert len(data) == len(masks)
+    return [item for item, keep in zip(data, masks) if keep]
+
+
+def fill_none_with_masks(data: list[Optional[torch.Tensor]], masks: list[bool]):
+    data_iter = iter(data)
+    return [next(data_iter) if kept else None for kept in masks]
