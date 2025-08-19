@@ -257,7 +257,7 @@ def forward(self, b_parametrizations_buffer_original0, x):
         self.assertEqual(res, ref)
 
     @skipIfHpu
-    def test_dtensor_dynamic(self):
+    def test_dtensor_dynamic_1(self):
         mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
 
         # test passing in DTensor as inputs/outputs and run some tensor computation
@@ -268,7 +268,7 @@ def forward(self, b_parametrizations_buffer_original0, x):
                 .to_local()[0]
             )
 
-        x = DTensor.from_local(torch.rand(4, 4), mesh, [Shard(0)], run_check=False)
+        x = DTensor.from_local(torch.rand(4, 4, requires_grad=True), mesh, [Shard(0)], run_check=False)
         torch._dynamo.mark_dynamic(x, 0)
         ref = fn(x)
 
@@ -289,7 +289,7 @@ def forward(self, b_parametrizations_buffer_original0, x):
                 for t in torch.tensor_split(x, 2)
             ]
 
-        x = DTensor.from_local(torch.rand(4, 4), mesh, [Shard(0)], run_check=False)
+        x = DTensor.from_local(torch.rand(4, 4, requires_grad=True), mesh, [Shard(0)], run_check=False)
         ref = fn(x)
 
         opt_fn = torch.compile(fn, backend="aot_eager", fullgraph=True, dynamic=True)

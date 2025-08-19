@@ -862,7 +862,9 @@ def _compile(
                 )
             )
             stack.enter_context(CompileTimeInstructionCounter.record())
-            return _compile_inner(code, one_graph, hooks, transform)
+            from torch._dispatch.python import enable_python_dispatcher
+            with enable_python_dispatcher():
+                return _compile_inner(code, one_graph, hooks, transform)
 
         return (
             ConvertFrameReturn()
