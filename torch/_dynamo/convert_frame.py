@@ -1018,7 +1018,7 @@ def _compile(
                 cache_entry,
                 hooks.guard_fail_fn if hooks else None,
                 hooks.guard_filter_fn if hooks else None,
-                guards_serialization_mode="save" if package else None,
+                save_guards=True if package else False,
             )
 
         if package is not None:
@@ -1560,6 +1560,7 @@ class CatchErrorsWrapper:
         frame_state: dict[str, Union[int, FrameStateSizeEntry]],
     ) -> ConvertFrameReturn:
         assert frame_state is not None
+
         input_codes.add(frame.f_code)
 
         is_skipfile = trace_rules.check(frame.f_code)
