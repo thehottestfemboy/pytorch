@@ -23,7 +23,7 @@ from torch._inductor.virtualized import V
 from torch._library.triton import wrap_triton
 from torch.fx import GraphModule
 from torch.utils import _pytree as pytree
-from torch.utils._sympy.functions import CeilDiv
+from torch.utils._sympy.functions import CeilDiv, FloorDiv
 from torch.utils._sympy.interp import _run_sympy_handler, sympy_interp
 from torch.utils._sympy.reference import OptimizedPythonReferenceAnalysis
 
@@ -460,8 +460,10 @@ class FxConverter:
 
             def replace_floor_div(expr: sympy.Expr) -> sympy.Expr:
                 """
-                Converts floor(x / c) to x // c.
+                Converts -x / c or to (x + c - 1) / c
+                Converts (x / c + y / c) to (x + y) / c
                 """
+                expr = sympy.together(expr)
                 if isinstance(expr, sympy.core.mul.Mul) and isinstance(
                     expr.args[0], sympy.Rational
                 ):
@@ -476,7 +478,10 @@ class FxConverter:
                         f"Unsound replacement: '{new_expr}' != '{expr}'"
                     )
                     # Undo the python division trick and replace with explicit CeilDiv
-                    return -CeilDiv(-numerator, denominator)
+                    if numerator.is_negative:
+                        return -CeilDiv(-numerator, denominator)
+                    else:
+                        return FloorDiv(numerator, denominator)
                 else:
                     return sympy.floor(expr)
 
