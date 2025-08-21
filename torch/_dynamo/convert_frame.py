@@ -51,7 +51,6 @@ from weakref import ReferenceType
 import torch
 import torch._logging
 from torch._C._dynamo.guards import GlobalStateGuard
-from torch._dispatch.python import enable_python_dispatcher
 from torch._dynamo.callback import CallbackTrigger
 from torch._dynamo.distributed import get_compile_pg
 from torch._dynamo.symbolic_convert import TensorifyState
@@ -863,8 +862,7 @@ def _compile(
                 )
             )
             stack.enter_context(CompileTimeInstructionCounter.record())
-            with enable_python_dispatcher():
-                return _compile_inner(code, one_graph, hooks, transform)
+            return _compile_inner(code, one_graph, hooks, transform)
 
         return (
             ConvertFrameReturn()
