@@ -1462,7 +1462,6 @@ def _assert_async(cond, msg):
         dtype=cond.get_dtype(),
         inner_fn=inner_fn,
         ranges=list(cond.get_size()),
-        side_effects=True,
     )
 
     assertion_op.realize()
