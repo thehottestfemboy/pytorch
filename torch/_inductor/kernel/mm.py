@@ -49,6 +49,7 @@ from ..utils import (
     use_cpp_gemm_template,
     use_cutlass_template,
     use_decompose_k_choice,
+    use_contiguous,
     use_triton_template,
     use_triton_tma_template,
 )
@@ -654,6 +655,9 @@ def decomposeK(a, b, k_splits):
     reduced_buf = torch.sum(result, 0)
     return reduced_buf.to(a.dtype)
 
+def contiguous(a, b):
+    return torch.mm(a, b.contiguous())
+
 
 @register_lowering(aten.mm, type_promotion_kind=None)
 def tuned_mm(mat1, mat2, *, layout=None):
@@ -763,6 +767,27 @@ def tuned_mm(mat1, mat2, *, layout=None):
                     input_nodes=(mat1, mat2),
                     layout=layout,
                 )
+        if use_contiguous(mat2) and not unbacked_symbols:
+            from torch._dispatch.python import enable_python_dispatcher
+
+            from ..decomposition import select_decomp_table
+
+            with enable_python_dispatcher():
+                decompositions = select_decomp_table()
+
+                contiguous_subgraph_template = SubgraphTemplate(
+                    name=f"contiguous_mm",
+                    make_fx_graph=make_fx(
+                        contiguous,
+                        decompositions,
+                    ),
+                )
+
+            contiguous_subgraph_template.maybe_append_choice(
+                choices,
+                input_nodes=(mat2),
+                layout=layout,
+            )
 
     if (
         is_nonzero
