@@ -840,12 +840,123 @@ class DynamoOutput:
     bytecode: types.CodeType
     last_attempt_start_time: Optional[float]
 
+    def build_guards(
+        self,
+        code: types.CodeType,
+        hooks: Optional[Hooks] = None,
+        save: bool = False,
+        cache_entry: Optional[CacheEntry] = None,
+    ) -> CheckFunctionManager:
+        assert self.tracer_output.output_graph is not None
+        return CheckFunctionManager(
+            code,
+            self.tracer_output.output_graph,
+            cache_entry,
+            hooks.guard_fail_fn if hooks else None,
+            hooks.guard_filter_fn if hooks else None,
+            save_guards=save,
+        )
+
+
+@dataclass
+class BackendInput:
+    backend_id: str
+    graph_module: torch.fx.GraphModule
+    example_inputs: Any
+    fake_mode: torch._subclasses.fake_tensor.FakeTensorMode
+
+
+@dataclass
+class CaptureOutput:
+    dynamo_output: DynamoOutput
+    backend_input: BackendInput
+
+
+@dataclass
+class FrameInfo:
+    code: types.CodeType
+    globals: dict[str, object]
+    locals: dict[str, object]
+    builtins: dict[str, object]
+    closure: tuple[CellType]
+
+
+def fullgraph_capture(frame: FrameInfo) -> CaptureOutput:
+    from torch._guards import TracingContext
+
+    backend_input: Optional[BackendInput] = None
+
+    def fullgraph_compiler(
+        gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+    ) -> torch.fx.GraphModule:
+        nonlocal backend_input
+        fake_mode = TracingContext.get().fake_mode
+        assert fake_mode is not None
+        assert isinstance(gm._backend_id, str)
+        backend_input = BackendInput(gm._backend_id, gm, example_inputs, fake_mode)
+        return gm
+
+    dynamo_output = compile_frame(
+        frame.code,
+        frame.globals,
+        frame.locals,
+        frame.builtins,
+        frame.closure,
+        compiler_fn=fullgraph_compiler,
+        one_graph=True,
+        restart_reasons=set(),
+    )
+    assert backend_input is not None
+    return CaptureOutput(dynamo_output, backend_input)
+
 
 def compile_frame(  # type: ignore[return]
     code: types.CodeType,
-    transform: Callable[[list[Instruction], dict[str, Any]], DynamoTracerOutput],
+    globals: dict[str, object],
+    locals: dict[str, object],
+    builtins: dict[str, object],
+    closure: tuple[CellType],
+    compiler_fn: CompilerFn,
+    one_graph: bool,
     restart_reasons: set[str],
+    *,
+    export: bool = False,
+    export_constraints: Optional[typing.Never] = None,
+    frame_state: Optional[dict[str, Union[int, FrameStateSizeEntry]]] = None,
+    distributed_state: Optional[DistributedState] = None,
+    package: Optional[CompilePackage] = None,
 ) -> DynamoOutput:
+    # This is shared across restarts
+    speculation_log = SpeculationLog()
+
+    def transform(
+        instructions: list[Instruction], code_options: dict[str, object]
+    ) -> DynamoTracerOutput:
+        tf_mode_stack: list[torch.overrides.TorchFunctionMode] = (
+            torch.overrides._get_current_function_mode_stack()
+        )
+        tracer_output = trace_frame(
+            code,
+            globals,
+            locals,
+            builtins,
+            closure,
+            compiler_fn,
+            tf_mode_stack,
+            one_graph,
+            speculation_log,
+            instructions,
+            code_options,
+            export=export,
+            export_constraints=export_constraints,
+            frame_state=frame_state,
+            distributed_state=distributed_state,
+            package=package,
+        )
+
+        assert tracer_output is not None
+        return tracer_output
+
     last_attempt_start_time = None
     for attempt in itertools.count():
         CompileContext.get().attempt = attempt
@@ -926,40 +1037,9 @@ def _compile(
     # Time spent compiling this frame before restarting or failing analysis
     dynamo_time_before_restart: float = 0.0
 
-    def transform(
-        instructions: list[Instruction], code_options: dict[str, object]
-    ) -> DynamoTracerOutput:
-        tf_mode_stack: list[torch.overrides.TorchFunctionMode] = (
-            torch.overrides._get_current_function_mode_stack()
-        )
-        tracer_output = trace_frame(
-            code,
-            globals,
-            locals,
-            builtins,
-            closure,
-            compiler_fn,
-            tf_mode_stack,
-            one_graph,
-            speculation_log,
-            instructions,
-            code_options,
-            export=export,
-            export_constraints=export_constraints,
-            frame_state=frame_state,
-            distributed_state=distributed_state,
-            package=package,
-        )
-
-        assert tracer_output is not None
-        return tracer_output
-
     @compile_time_strobelight_meta(phase_name="compile_inner")
     def compile_inner(
-        code: CodeType,
-        one_graph: bool,
-        hooks: Hooks,
-        transform: Callable[[list[Instruction], dict[str, Any]], Any],
+        code: CodeType, one_graph: bool, hooks: Hooks
     ) -> tuple[ConvertFrameReturn, Optional[DynamoTracerOutput]]:
         with contextlib.ExitStack() as stack:
             stack.enter_context(
@@ -968,7 +1048,7 @@ def _compile(
                 )
             )
             stack.enter_context(CompileTimeInstructionCounter.record())
-            return _compile_inner(code, one_graph, hooks, transform)
+            return _compile_inner(code, one_graph, hooks)
 
         return (
             ConvertFrameReturn(),
@@ -980,7 +1060,6 @@ def _compile(
         code: CodeType,
         one_graph: bool,
         hooks: Hooks,
-        transform: Callable[[list[Instruction], dict[str, Any]], Any],
     ) -> tuple[ConvertFrameReturn, DynamoTracerOutput]:
         nonlocal dynamo_time_before_restart
         last_attempt_start_time = start_time = time.time()
@@ -1003,7 +1082,21 @@ def _compile(
 
         out_code = None
         try:
-            dynamo_output = compile_frame(code, transform, restart_reasons)
+            dynamo_output = compile_frame(
+                code,
+                globals,
+                locals,
+                builtins,
+                closure,
+                compiler_fn,
+                one_graph,
+                restart_reasons,
+                export=export,
+                export_constraints=export_constraints,
+                frame_state=frame_state,
+                distributed_state=distributed_state,
+                package=package,
+            )
         except exc.SkipFrame as e:
             if one_graph or _is_error_on_graph_break(e._torch_dynamo_tracer_output):
                 log.debug(
@@ -1091,13 +1184,11 @@ def _compile(
         CleanupManager.instance[out_code] = output.cleanups
         nonlocal cache_entry
         with dynamo_timed("build_guards", log_pt2_compile_event=True):
-            check_fn = CheckFunctionManager(
+            check_fn = dynamo_output.build_guards(
                 code,
-                output,
-                cache_entry,
-                hooks.guard_fail_fn if hooks else None,
-                hooks.guard_filter_fn if hooks else None,
-                save_guards=True if package else False,
+                hooks=hooks,
+                save=package is not None,
+                cache_entry=cache_entry,
             )
 
         if package is not None:
@@ -1145,8 +1236,6 @@ def _compile(
         code_context,
     ):
         restart_reasons: set[str] = set()
-        # This is shared across restarts
-        speculation_log = SpeculationLog()
         if compile_pg := get_compile_pg():
             distributed_state = DistributedState(compile_pg, LocalState())
         else:
@@ -1277,9 +1366,7 @@ def _compile(
         torch._dynamo.utils.ReinplaceCounters.clear()
         guarded_code = None
         try:
-            guarded_code, tracer_output = compile_inner(
-                code, one_graph, hooks, transform
-            )
+            guarded_code, tracer_output = compile_inner(code, one_graph, hooks)
 
             # NB: We only put_code_state in success case.  Success case here
             # does include graph breaks; specifically, if a graph break still
