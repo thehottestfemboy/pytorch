@@ -46,10 +46,10 @@ from ..utils import (
     use_aten_gemm_kernels,
     use_ck_gemm_template,
     use_ck_tile_gemm_template,
+    use_contiguous,
     use_cpp_gemm_template,
     use_cutlass_template,
     use_decompose_k_choice,
-    use_contiguous,
     use_triton_template,
     use_triton_tma_template,
 )
@@ -655,6 +655,7 @@ def decomposeK(a, b, k_splits):
     reduced_buf = torch.sum(result, 0)
     return reduced_buf.to(a.dtype)
 
+
 def contiguous(a, b):
     return torch.mm(a, b.contiguous())
 
@@ -776,7 +777,7 @@ def tuned_mm(mat1, mat2, *, layout=None):
                 decompositions = select_decomp_table()
 
                 contiguous_subgraph_template = SubgraphTemplate(
-                    name=f"contiguous_mm",
+                    name="contiguous_mm",
                     make_fx_graph=make_fx(
                         contiguous,
                         decompositions,
@@ -785,7 +786,7 @@ def tuned_mm(mat1, mat2, *, layout=None):
 
             contiguous_subgraph_template.maybe_append_choice(
                 choices,
-                input_nodes=(mat2),
+                input_nodes=(mat1, mat2),
                 layout=layout,
             )
 
