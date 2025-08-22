@@ -767,7 +767,7 @@ def tuned_mm(mat1, mat2, *, layout=None):
                     input_nodes=(mat1, mat2),
                     layout=layout,
                 )
-        if use_contiguous(mat2) and not unbacked_symbols:
+        if use_contiguous(mat2.get_layout()) and not unbacked_symbols:
             from torch._dispatch.python import enable_python_dispatcher
 
             from ..decomposition import select_decomp_table

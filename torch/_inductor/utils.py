@@ -1799,13 +1799,13 @@ def use_decompose_k_choice(m: _IntLike, n: _IntLike, k: _IntLike) -> bool:
     )
 
 @functools.cache
-def use_contiguous(mat2) -> bool:
+def use_contiguous(layout: Layout) -> bool:
     """
     Check if we should use the contiguous subgraph transform.
     This transform makes the second matrix contiguous before the matmul.
     """
     # Only enable for non-contiguous second matrix
-    if mat2.get_layout().is_contiguous():
+    if layout.is_contiguous():
         return False
     
     # Similar conditions to decompose_k but for contiguous transform
