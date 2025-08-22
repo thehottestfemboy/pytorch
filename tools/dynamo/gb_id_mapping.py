@@ -48,18 +48,18 @@ def clean_string(s: Any) -> Any:
     return s
 
 
-def expand_hints(hints: list[str], dynamo_dir_str: Optional[str] = None) -> list[str]:
+def expand_hints(hints: list[str], dynamo_dir: Optional[str] = None) -> list[str]:
     """
     Expands hint references to their actual values from graph_break_hints.
     Uses exec() to avoid import dependencies.
     """
-    if dynamo_dir_str is None:
+    if dynamo_dir is None:
         script_dir = Path(__file__).resolve().parent
-        dynamo_dir = script_dir.parent.parent / "torch" / "_dynamo"
+        dynamo_dir_path = script_dir.parent.parent / "torch" / "_dynamo"
     else:
-        dynamo_dir = Path(dynamo_dir_str)
+        dynamo_dir_path = Path(dynamo_dir)
 
-    graph_break_hints_path = dynamo_dir / "graph_break_hints.py"
+    graph_break_hints_path = dynamo_dir_path / "graph_break_hints.py"
 
     with open(graph_break_hints_path) as f:
         hints_source = f.read()
@@ -114,15 +114,15 @@ def extract_info_from_keyword(source: str, kw: ast.keyword) -> Any:
 
 
 def find_unimplemented_v2_calls(
-    path_str: str, dynamo_dir: Optional[str] = None
+    path: str, dynamo_dir: Optional[str] = None
 ) -> list[dict[str, Any]]:
     results = []
-    path = Path(path_str)
+    path_obj = Path(path)
 
-    if path.is_dir():
-        file_paths = path.glob("**/*.py")
+    if path_obj.is_dir():
+        file_paths = path_obj.glob("**/*.py")
     else:
-        file_paths = [path]  # type: ignore[assignment]
+        file_paths = [path_obj]  # type: ignore[assignment]
 
     for file_path in file_paths:
         with open(file_path) as f:
