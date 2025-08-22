@@ -1,6 +1,6 @@
 # mypy: ignore-errors
 import math
-from typing import Any, Callable, cast, Dict, Union, TYPE_CHECKING
+from typing import Any, Callable, cast, Dict, Union
 
 import torch
 import torch.utils._pytree as pytree
@@ -10,6 +10,7 @@ from .. import ir, scheduler
 from ..dependencies import StarDep, WeakDep
 from ..utils import buf_name_to_fused_snode, is_collective
 from ..virtualized import V
+from .reorder import _check_ir_node_fsdp
 
 
 def get_fx_node(
@@ -26,15 +27,50 @@ def get_fx_node(
             f"Expected BaseSchedulerNode or IRNode, got {type(snode_or_ir_node)}. Offending value: {snode_or_ir_node}"
         )
     origins_with_expected_op = [o for o in origins if o.target == expected_op]
-    assert len(origins_with_expected_op) == 1
+    if len(origins_with_expected_op) != 1:
+        print("[Get FX exception happen]origins_with_expected_op", origins_with_expected_op, "expected_op", expected_op, "snode_or_ir_node", snode_or_ir_node)
+        return None
     return origins_with_expected_op[0]
 
 
-def has_reduce_scatter_in_nodes(snodes: list["scheduler.BaseSchedulerNode"]) -> bool:
+def get_non_bucketable_pg(snodes):
+    non_bucketable_pg = set()
+    accept_op_list = ["all_gather_into_tensor", "convert_element_type", "primals", "sum"]
+    def _check_op_in_accept_op_list(inputs_node_origins):
+        for op in inputs_node_origins:
+            seen_in_accept_op_list = False
+            for op_name in accept_op_list:
+                if op_name in str(op):
+                    seen_in_accept_op_list = True
+            if not seen_in_accept_op_list:
+                return False
+        return True
+
+    for snode in snodes:
+        # If the origin has op outside of accept_op_list, it means there will be strong dependency with previous comp
+        # thus, this means it's not bucketable
+        if is_collective(snode.node, op=torch.ops._c10d_functional.all_gather_into_tensor.default):
+            ir_node = snode.node
+            ir_node_origins = list(getattr(ir_node, "origins", None))
+            if ir_node_origins is None:
+                continue
+            ag_fx_node = get_fx_node(
+                snode,
+                expected_op=torch.ops._c10d_functional.all_gather_into_tensor.default,
+            )
+            ag_input_fx_nodes = [ag_fx_node.args[0]]
+
+            if not _check_op_in_accept_op_list(ir_node_origins) or not _check_op_in_accept_op_list(ag_input_fx_nodes):
+                non_bucketable_pg.add(snode.node.constant_args[1])
+                print("AG snode.node.constant_args[1]", snode.node.get_name(), snode.node.constant_args[0], snode.node.constant_args[1], "ir_node_origins", ir_node_origins, ag_fx_node, "ag_input_fx_nodes", ag_input_fx_nodes)
+
+    return non_bucketable_pg
+
+def has_reduce_scatter_in_nodes(snodes: list["scheduler.BaseSchedulerNode"], non_bucketable_pg) -> bool:
     for snode in snodes:
         if is_collective(
             snode.node, op=torch.ops._c10d_functional.reduce_scatter_tensor.default
-        ):
+        ) and _check_ir_node_fsdp(snode.node, non_bucketable_pg):
             return True
     return False
 
@@ -310,7 +346,7 @@ def bucket_all_gathers(
             param_all_gather_outputs_flattened,
             inp_split_sizes,
             all_gather_input_numel,
-            example_ag_input_tensor.device.index,
+            example_ag_input_tensor.device.index % group_size,
         ),
         {},
     )
@@ -398,7 +434,7 @@ def bucket_reduce_scatters(
     )
     assert all(n.meta["val"].dtype == reduce_dtype for n in unsharded_grads_fx_nodes)
     device = unsharded_grads_fx_nodes[0].meta["val"].device
-    rank = device.index
+    rank = device.index % group_size
     # TODO(yf225): need more work if we want to support non-dim-0 sharding (e.g. search for `shard_dim` in FSDP2 codebase)
     shard_dim = 0
 
