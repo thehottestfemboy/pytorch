@@ -25,8 +25,11 @@ def sample_vllm_test_library():
             },
             "steps": [
                 "pytest -v -s basic_correctness/test_cumem.py",
+                "echo $VLLM_WORKER_MULTIPROC_METHOD",
                 "pytest -v -s basic_correctness/test_basic_correctness.py",
+                "echo $VLLM_WORKER_MULTIPROC_METHOD",
                 "pytest -v -s basic_correctness/test_cpu_offload.py",
+                "echo $VLLM_WORKER_MULTIPROC_METHOD",
                 "VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py",
             ],
         },
