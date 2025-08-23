@@ -4192,6 +4192,14 @@ def meta_binop_inplace_alpha(self, other, alpha=1):
         check_inplace_broadcast(self.shape, other.shape)
     return self
 
+@register_meta(
+    [
+        aten.add.Scalar,
+        aten.sub.Scalar,
+    ],
+)
+def meta_binop_alpha(self, other, alpha=1):
+    return torch.empty_like(self)
 
 @register_meta([aten.round.default, aten.round.decimals])
 def meta_round(self, **kwargs):
